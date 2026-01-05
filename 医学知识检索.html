@@ -628,16 +628,19 @@
                         <div id="qaJournalDropdown" class="journal-dropdown"></div>
                         <div id="qaSelectedJournals" class="d-flex flex-wrap gap-1 mt-1"></div>
                     </div>
-                    <!-- 模型 -->
+                    <!-- 模型多选 -->
                     <div class="col-md-3">
-                        <label class="form-label small fw-bold">生成模型</label>
-                        <select id="qaModelSelect" class="form-select form-select-sm">
-                            <option value="gemini-3-pro-preview-thinking">Gemini 3 Pro</option>
-                            <option value="gpt-5.2">GPT-5.2</option>
-                            <option value="claude-opus-4-5-20251101-thinking">Claude Opus 4.5</option>
-                            <option value="doubao-seed-1-8-251215">Doubao Seed</option>
-                            <option value="DeepSeek-V3.2-Thinking">DeepSeek V3.2</option>
-                        </select>
+                        <label class="form-label small fw-bold">模型 <span
+                                class="text-muted fw-normal">(可多选)</span></label>
+                        <div id="qaModelSelect" class="d-flex flex-column gap-1" style="font-size:0.85rem;">
+                            <label><input type="checkbox" value="gemini-3-pro-preview-thinking" checked> Gemini 3
+                                Pro</label>
+                            <label><input type="checkbox" value="gpt-5.2"> GPT 5.2</label>
+                            <label><input type="checkbox" value="claude-opus-4-5-20251101-thinking"> Claude Opus
+                                4.5</label>
+                            <label><input type="checkbox" value="doubao-seed-1-8-251215"> Doubao Seed</label>
+                            <label><input type="checkbox" value="DeepSeek-V3.2-Thinking"> DeepSeek V3.2</label>
+                        </div>
                     </div>
                 </div>
 
@@ -645,6 +648,14 @@
                 <div class="mb-3">
                     <label class="form-label small fw-bold">问题</label>
                     <textarea id="qaQuestion" class="form-control" rows="2" placeholder="例如：糖尿病的最新治疗方法有哪些？"></textarea>
+                </div>
+
+                <!-- 直接问答选项 -->
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" id="qaDirectMode">
+                    <label class="form-check-label small" for="qaDirectMode">
+                        直接问答 <span class="text-muted">(不检索文献，直接使用AI知识回答)</span>
+                    </label>
                 </div>
 
                 <button class="btn w-100" style="background:var(--primary-color);color:white;" id="qaSearchBtn"
@@ -718,7 +729,8 @@
             <div id="qaAnswer" class="d-none mt-3">
                 <div class="search-card">
                     <h5 class="mb-3">AI回答</h5>
-                    <div id="qaAnswerContent" class="p-3 bg-white border rounded" style="line-height:1.8;"></div>
+                    <!-- 多模型回答容器 -->
+                    <div id="qaAnswerContent" style="font-size:0.9rem;line-height:1.7;"></div>
 
                     <!-- 参考文献 -->
                     <div id="qaReferences" class="mt-4">
@@ -1523,7 +1535,17 @@ ${context}`;
             document.getElementById('qaSearchBtn').disabled = true;
             document.getElementById('qaSpinner').classList.remove('d-none');
 
+            // 检查是否直接问答模式
+            const isDirectMode = document.getElementById('qaDirectMode').checked;
+
             try {
+                if (isDirectMode) {
+                    // === 直接问答模式：跳过检索 ===
+                    await handleDirectQuery(question);
+                    return;
+                }
+
+                // === RAG模式：检索+生成 ===
                 // === 阶段0: 生成检索式 ===
                 updateQAProgress(5, '正在使用AI生成检索式...');
                 const searchQuery = await generateSearchQuery(question);
@@ -1621,69 +1643,102 @@ ${context}`;
                     `<div class="mb-1">[${i + 1}] <strong>${c.source?.title || '未知'}</strong><br><span class="text-muted small">${c.text}</span></div>`
                 ).join('');
 
-                // === 阶段5: 生成回答 ===
+                // === 阶段5: 生成回答（支持多模型） ===
                 updateQAProgress(85, '正在生成AI回答...');
-                const model = document.getElementById('qaModelSelect').value;
+
+                // 获取选中的模型
+                const selectedModels = Array.from(document.querySelectorAll('#qaModelSelect input:checked'))
+                    .map(cb => ({ value: cb.value, name: cb.parentElement.textContent.trim() }));
+
+                if (selectedModels.length === 0) {
+                    showError('请至少选择一个模型');
+                    return;
+                }
 
                 // 构建带编号的上下文
                 const contextWithRefs = finalChunks.map((c, i) =>
                     `[${i + 1}] ${c.source.title || '未知标题'}\n内容: ${c.text}`
                 ).join('\n\n');
 
-                const systemPrompt = `你是医学知识助手。根据以下文献回答问题。
-要求：
-1. 回答专业、准确、简洁
-2. 在引用信息后标注来源编号如[1][2]
-3. 不要在回答末尾列出参考文献（系统会单独显示）
-4. 资料不足时请说明
+                const systemPrompt = `严格基于以下学术文献回答问题。
 
-文献：
+要求：
+1. **循证为本**：紧密结合文献内容，体现医学专业性
+2. **实用导向**：给出具体、可操作的建议，便于临床或日常应用
+3. **规范引用**：在关键信息后标注来源编号如[1][2]
+4. **结构清晰**：分点论述，重点突出
+5. **如实告知**：资料不足时说明
+6. 不要在回答末尾列出参考文献
+7. 直接回答问题，不要有"作为AI"、"根据我的知识"、"我来分析"等自我介绍
+
+参考文献：
 ${contextWithRefs}`;
 
-                const response = await fetch(`${AI_CONFIG.baseUrl}/chat/completions`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${AI_CONFIG.apiKey}`
-                    },
-                    body: JSON.stringify({
-                        model: model,
-                        messages: [
-                            { role: 'system', content: systemPrompt },
-                            { role: 'user', content: question }
-                        ]
-                    })
+                // 清空回答区并准备多模型容器（3个及以内横向，超过3个纵向）
+                const answerContainer = document.getElementById('qaAnswerContent');
+                const isHorizontal = selectedModels.length <= 3;
+                const colClass = isHorizontal ? `col-md-${Math.floor(12 / selectedModels.length)}` : '';
+
+                answerContainer.innerHTML = isHorizontal
+                    ? `<div class="row g-3">${selectedModels.map(m =>
+                        `<div class="${colClass}">
+                            <div class="p-3 bg-white border rounded h-100" id="answer-${m.value.replace(/[^a-z0-9]/gi, '')}">
+                                <div class="fw-bold text-primary mb-2" style="font-size:0.85rem;">${m.name}</div>
+                                <div class="answer-body text-muted">生成中...</div>
+                            </div>
+                        </div>`).join('')}</div>`
+                    : selectedModels.map(m =>
+                        `<div class="mb-3 p-3 bg-white border rounded" id="answer-${m.value.replace(/[^a-z0-9]/gi, '')}">
+                            <div class="fw-bold text-primary mb-2">${m.name}</div>
+                            <div class="answer-body text-muted">生成中...</div>
+                        </div>`).join('');
+
+                // 并行调用所有选中模型
+                const modelPromises = selectedModels.map(async (modelInfo) => {
+                    const containerId = `answer-${modelInfo.value.replace(/[^a-z0-9]/gi, '')}`;
+                    try {
+                        const response = await fetch(`${AI_CONFIG.baseUrl}/chat/completions`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${AI_CONFIG.apiKey}`
+                            },
+                            body: JSON.stringify({
+                                model: modelInfo.value,
+                                messages: [
+                                    { role: 'system', content: systemPrompt },
+                                    { role: 'user', content: question }
+                                ]
+                            })
+                        });
+                        const aiData = await response.json();
+                        let answer = aiData.choices?.[0]?.message?.content || '未能生成回答';
+
+                        // 渲染Markdown并转换引用为上标
+                        let rendered = typeof marked !== 'undefined' ? marked.parse(answer) : answer.replace(/\n/g, '<br>');
+                        rendered = rendered.replace(/\[(\d+)\]/g, '<sup class="text-primary" style="font-size:0.7em">[$1]</sup>');
+
+                        document.querySelector(`#${containerId} .answer-body`).innerHTML = rendered;
+                        document.querySelector(`#${containerId} .answer-body`).classList.remove('text-muted');
+                    } catch (e) {
+                        document.querySelector(`#${containerId} .answer-body`).innerHTML = `<span class="text-danger">生成失败: ${e.message}</span>`;
+                    }
                 });
 
-                const aiData = await response.json();
-                let answer = aiData.choices?.[0]?.message?.content || '抱歉，未能生成回答。';
+                // 等待所有模型完成后更新进度
+                Promise.all(modelPromises).then(() => {
+                    updateQAProgress(100, '全部模型生成完成！');
+                });
 
-                // 检查是否因token限制截断
-                if (aiData.choices?.[0]?.finish_reason === 'length') {
-                    answer += '\n\n**[回答因长度限制被截断，请使用追问获取更多信息]**';
-                }
-
-                // 保存对话上下文（用于多轮对话）
+                // 保存对话上下文（使用第一个模型）
                 window.qaContext = {
                     systemPrompt: systemPrompt,
-                    history: [
-                        { role: 'user', content: question },
-                        { role: 'assistant', content: answer }
-                    ],
-                    model: model,
+                    history: [{ role: 'user', content: question }],
+                    models: selectedModels,
                     refs: finalChunks
                 };
 
-                // === 阶段6: 展示结果 ===
-                updateQAProgress(100, '完成！');
-
-                // 使用marked渲染Markdown，并将引用格式转为上标
-                let renderedAnswer = typeof marked !== 'undefined'
-                    ? marked.parse(answer)
-                    : answer.replace(/\n/g, '<br>');
-                // 将[1][2]等转为蓝色上标
-                renderedAnswer = renderedAnswer.replace(/\[(\d+)\]/g, '<sup class="text-primary" style="font-size:0.7em;cursor:pointer" onclick="document.getElementById(\'qaRefList\').scrollIntoView()">[$1]</sup>');
-                document.getElementById('qaAnswerContent').innerHTML = renderedAnswer;
+                // 先显示结果区域（进度会在模型完成后更新）
 
                 // 显示参考文献
                 const refListHtml = finalChunks.map((c, i) => {
@@ -1696,11 +1751,96 @@ ${contextWithRefs}`;
                 }).join('');
                 document.getElementById('qaRefList').innerHTML = refListHtml;
 
-                // 显示结果区域
+                // 显示结果区域（RAG模式显示参考文献）
+                document.getElementById('qaReferences').classList.remove('d-none');
                 document.getElementById('qaAnswer').classList.remove('d-none');
 
             } catch (err) {
                 showError('处理失败: ' + err.message);
+            } finally {
+                document.getElementById('qaSearchBtn').disabled = false;
+                document.getElementById('qaSpinner').classList.add('d-none');
+            }
+        }
+
+        // 直接问答模式（不检索文献）
+        async function handleDirectQuery(question) {
+            try {
+                updateQAProgress(30, '正在生成AI回答（直接模式）...');
+
+                // 获取选中的模型
+                const selectedModels = Array.from(document.querySelectorAll('#qaModelSelect input:checked'))
+                    .map(cb => ({ value: cb.value, name: cb.parentElement.textContent.trim() }));
+
+                if (selectedModels.length === 0) {
+                    showError('请至少选择一个模型');
+                    return;
+                }
+
+                const directPrompt = `请以专业医学顾问的角度回答以下问题。要求：
+1. 回答专业、准确、实用，便于理解和应用
+2. 结构清晰，分点论述
+3. 直接回答问题，不要有"作为AI"、"根据我的知识"等自我介绍`;
+
+                // 准备多模型容器
+                const answerContainer = document.getElementById('qaAnswerContent');
+                const isHorizontal = selectedModels.length <= 3;
+                const colClass = isHorizontal ? `col-md-${Math.floor(12 / selectedModels.length)}` : '';
+
+                answerContainer.innerHTML = isHorizontal
+                    ? `<div class="row g-3">${selectedModels.map(m =>
+                        `<div class="${colClass}">
+                            <div class="p-3 bg-white border rounded h-100" id="answer-${m.value.replace(/[^a-z0-9]/gi, '')}">
+                                <div class="fw-bold text-primary mb-2" style="font-size:0.85rem;">${m.name}</div>
+                                <div class="answer-body text-muted">生成中...</div>
+                            </div>
+                        </div>`).join('')}</div>`
+                    : selectedModels.map(m =>
+                        `<div class="mb-3 p-3 bg-white border rounded" id="answer-${m.value.replace(/[^a-z0-9]/gi, '')}">
+                            <div class="fw-bold text-primary mb-2">${m.name}</div>
+                            <div class="answer-body text-muted">生成中...</div>
+                        </div>`).join('');
+
+                // 并行调用所有选中模型
+                const modelPromises = selectedModels.map(async (modelInfo) => {
+                    const containerId = `answer-${modelInfo.value.replace(/[^a-z0-9]/gi, '')}`;
+                    try {
+                        const response = await fetch(`${AI_CONFIG.baseUrl}/chat/completions`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${AI_CONFIG.apiKey}`
+                            },
+                            body: JSON.stringify({
+                                model: modelInfo.value,
+                                messages: [
+                                    { role: 'system', content: directPrompt },
+                                    { role: 'user', content: question }
+                                ]
+                            })
+                        });
+                        const aiData = await response.json();
+                        let answer = aiData.choices?.[0]?.message?.content || '未能生成回答';
+
+                        let rendered = typeof marked !== 'undefined' ? marked.parse(answer) : answer.replace(/\n/g, '<br>');
+                        document.querySelector(`#${containerId} .answer-body`).innerHTML = rendered;
+                        document.querySelector(`#${containerId} .answer-body`).classList.remove('text-muted');
+                    } catch (e) {
+                        document.querySelector(`#${containerId} .answer-body`).innerHTML = `<span class="text-danger">生成失败: ${e.message}</span>`;
+                    }
+                });
+
+                // 等待所有模型完成
+                Promise.all(modelPromises).then(() => {
+                    updateQAProgress(100, '全部模型生成完成！');
+                });
+
+                // 隐藏参考文献区域（直接模式无文献）
+                document.getElementById('qaReferences').classList.add('d-none');
+                document.getElementById('qaAnswer').classList.remove('d-none');
+
+            } catch (err) {
+                showError('直接问答失败: ' + err.message);
             } finally {
                 document.getElementById('qaSearchBtn').disabled = false;
                 document.getElementById('qaSpinner').classList.add('d-none');
