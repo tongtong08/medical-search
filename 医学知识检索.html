@@ -1527,6 +1527,88 @@ ${context}`;
             return [question];  // 重试失败后使用原问题
         }
 
+        // 分析文献权威性和时效性
+        async function analyzeReferences(references) {
+            if (!references || references.length === 0) return references;
+
+            // 1. 基础规则标记 (时效性)
+            const currentYear = new Date().getFullYear();
+            references.forEach(ref => {
+                ref.tags = []; // 初始化
+                const year = parseInt(ref.year);
+                if (!isNaN(year)) {
+                    if (year >= 2024) ref.tags.push({ type: 'recent', label: '最新', icon: '🔥', class: 'bg-danger' });
+                    else if (year >= currentYear - 2) ref.tags.push({ type: 'recent', label: '近3年', icon: '🆕', class: 'bg-success' });
+                }
+            });
+
+            // 2. LLM 分析 (权威性)
+            // 提取期刊列表去重
+            const journals = [...new Set(references.map(r => r.journal).filter(j => j))];
+            if (journals.length === 0) return references;
+
+            // 为了速度，这里使用简单的白名单+LLM辅助
+            // 预设顶级期刊白名单 (可以快速匹配)
+            const topJournals = ['New England Journal of Medicine', 'The Lancet', 'JAMA', 'BMJ', 'Nature Medicine', 'Cell', 'Science', 'Nature'];
+
+            // 过滤出不在白名单的期刊给LLM判断
+            const journalsToAnalyze = journals.filter(j => !topJournals.some(top => j.includes(top)));
+
+            // 默认标记白名单期刊
+            let highImpactJournals = journals.filter(j => topJournals.some(top => j.includes(top)));
+
+            if (journalsToAnalyze.length > 0) {
+                const prompt = `你是一个医学期刊评估助手。请评估以下医学期刊的权威性。
+                
+期刊列表：
+${journalsToAnalyze.join('\n')}
+
+请识别其中属于SCI高分（如IF>10）或各领域公认的权威核心期刊。
+返回JSON格式：{"high_impact": ["期刊名1", "期刊名2"]}
+如果没有，数组为空。只返回JSON，不要解释。`;
+
+                try {
+                    const response = await fetch(`${AI_CONFIG.baseUrl}/chat/completions`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${AI_CONFIG.apiKey}`
+                        },
+                        body: JSON.stringify({
+                            model: 'gemini-3-flash-preview-thinking',
+                            messages: [{ role: 'user', content: prompt }],
+                            response_format: { type: "json_object" },
+                            max_tokens: 200
+                        })
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        try {
+                            let jsonStr = data.choices[0].message.content;
+                            // 清理可能存在的markdown标记
+                            jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
+                            const res = JSON.parse(jsonStr);
+                            if (res.high_impact && Array.isArray(res.high_impact)) {
+                                highImpactJournals.push(...res.high_impact);
+                            }
+                        } catch (e) { console.warn('解析期刊评价JSON失败', e); }
+                    }
+                } catch (e) {
+                    console.warn('AI文献评估API调用失败:', e);
+                }
+            }
+
+            // 标记权威期刊
+            references.forEach(ref => {
+                if (ref.journal && highImpactJournals.includes(ref.journal)) {
+                    ref.tags.push({ type: 'impact', label: '权威', icon: '⭐', class: 'bg-warning text-dark' });
+                    ref.isHighImpact = true;
+                }
+            });
+
+            return references;
+        }
+
         // 主RAG流程
         async function startRAGQuery() {
             const question = document.getElementById('qaQuestion').value.trim();
@@ -1668,6 +1750,12 @@ ${context}`;
                 const rerankedChunks = await rerankDocuments(question, topChunks);
                 const finalChunks = rerankedChunks.slice(0, 10);
 
+                // === 阶段4.5: 文献权威性评估 ===
+                updateQAProgress(80, '正在评估文献权威性...');
+                // 提取源并去重，进行评估
+                const uniqueSources = [...new Set(finalChunks.map(c => c.source))];
+                await analyzeReferences(uniqueSources);
+
                 // 填充重排详情
                 document.getElementById('qaDetailRerank').innerHTML = finalChunks.map((c, i) =>
                     `<div class="mb-1">[${i + 1}] <strong>${c.source?.title || '未知'}</strong><br><span class="text-muted small">${c.text}</span></div>`
@@ -1686,9 +1774,10 @@ ${context}`;
                 }
 
                 // 构建带编号的上下文
-                const contextWithRefs = finalChunks.map((c, i) =>
-                    `[${i + 1}] ${c.source.title || '未知标题'}\n内容: ${c.text}`
-                ).join('\n\n');
+                const contextWithRefs = finalChunks.map((c, i) => {
+                    const authorityMark = c.source.isHighImpact ? '【高分权威期刊】' : '';
+                    return `[${i + 1}] ${authorityMark}${c.source.title || '未知标题'}\n内容: ${c.text}`;
+                }).join('\n\n');
 
                 const systemPrompt = `严格基于以下学术文献回答问题。
 
@@ -1696,7 +1785,7 @@ ${context}`;
 1. **直接回答**：开门见山直接给出医学结论或分析，**严禁**使用"基于文献"、"根据搜索结果"、"通过分析资料"等任何铺垫语句。
 2. **循证为本**：内容必须紧密结合文献，但不要口头强调这一点。
 3. **实用导向**：给出具体、可操作的建议。
-4. **规范引用**：在关键信息后标注来源编号如[1][2]。
+4. **规范引用**：在关键信息后标注来源编号如[1][2]。优先引用权威高分期刊。
 5. **结构清晰**：分点论述，重点突出。
 6. **如实告知**：资料不足时说明。
 7. 不要在回答末尾列出参考文献。
@@ -1738,7 +1827,8 @@ ${contextWithRefs}`;
                                 messages: [
                                     { role: 'system', content: systemPrompt },
                                     { role: 'user', content: question }
-                                ]
+                                ],
+                                stream: false
                             })
                         });
                         const aiData = await response.json();
@@ -1746,7 +1836,17 @@ ${contextWithRefs}`;
 
                         // 渲染Markdown并转换引用为上标
                         let rendered = typeof marked !== 'undefined' ? marked.parse(answer) : answer.replace(/\n/g, '<br>');
-                        rendered = rendered.replace(/\[(\d+)\]/g, '<sup class="text-primary" style="font-size:0.7em">[$1]</sup>');
+
+                        // 增强引用显示: [1] -> [1]🔥
+                        rendered = rendered.replace(/\[(\d+)\]/g, (match, id) => {
+                            const idx = parseInt(id) - 1;
+                            if (finalChunks[idx]) {
+                                const source = finalChunks[idx].source;
+                                const icons = source.tags ? source.tags.map(t => t.icon).join('') : '';
+                                return `<sup class="text-primary fw-bold" style="font-size:0.7em; cursor:pointer;" onclick="document.getElementById('ref-${id}').scrollIntoView({behavior: 'smooth'})">[${id}]${icons}</sup>`;
+                            }
+                            return match;
+                        });
 
                         document.querySelector(`#${containerId} .answer-body`).innerHTML = rendered;
                         document.querySelector(`#${containerId} .answer-body`).classList.remove('text-muted');
@@ -1773,10 +1873,14 @@ ${contextWithRefs}`;
                 // 显示参考文献
                 const refListHtml = finalChunks.map((c, i) => {
                     const source = c.source;
-                    return `<div class="mb-2">
-                        <strong>[${i + 1}]</strong> 
-                        <a href="${source.link || '#'}" target="_blank">${source.title || '未知标题'}</a>
-                        ${source.journal ? `<span class="text-muted"> (${source.journal}${source.year ? ', ' + source.year : ''})</span>` : ''}
+                    const tagsHtml = source.tags ? source.tags.map(t =>
+                        `<span class="badge ${t.class || 'bg-secondary'} me-1" style="font-size:0.7em">${t.icon || ''} ${t.label}</span>`
+                    ).join('') : '';
+
+                    return `<div class="mb-2" id="ref-${i + 1}">
+                        <strong>[${i + 1}]</strong> ${tagsHtml}
+                        <a href="${source.link || '#'}" target="_blank" class="text-decoration-none fw-bold">${source.title || '未知标题'}</a>
+                        ${source.journal ? `<div class="text-muted small ps-4">Score: ${c.score?.toFixed(2) || 'N/A'} | ${source.journal}${source.year ? ', ' + source.year : ''}</div>` : ''}
                     </div>`;
                 }).join('');
                 document.getElementById('qaRefList').innerHTML = refListHtml;
