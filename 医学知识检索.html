@@ -1532,13 +1532,18 @@ ${context}`;
             if (!references || references.length === 0) return references;
 
             // 1. 基础规则标记 (时效性)
+            // 放宽标准：以2026年为例，2024-2026为最新(近3年)，2021-2023为近期(近5年)
             const currentYear = new Date().getFullYear();
             references.forEach(ref => {
                 ref.tags = []; // 初始化
                 const year = parseInt(ref.year);
                 if (!isNaN(year)) {
-                    if (year >= 2024) ref.tags.push({ type: 'recent', label: '最新', icon: '🔥', class: 'bg-danger' });
-                    else if (year >= currentYear - 2) ref.tags.push({ type: 'recent', label: '近3年', icon: '🆕', class: 'bg-success' });
+                    if (year >= currentYear - 2) {
+                        ref.tags.push({ type: 'recent', label: '近3年', icon: '🔥', class: 'bg-danger' });
+                    }
+                    else if (year >= currentYear - 5) {
+                        ref.tags.push({ type: 'recent', label: '近5年', icon: '🆕', class: 'bg-success' });
+                    }
                 }
             });
 
@@ -1547,8 +1552,7 @@ ${context}`;
             const journals = [...new Set(references.map(r => r.journal).filter(j => j))];
             if (journals.length === 0) return references;
 
-            // 为了速度，这里使用简单的白名单+LLM辅助
-            // 预设顶级期刊白名单 (可以快速匹配)
+            // 预设顶级期刊白名单
             const topJournals = ['New England Journal of Medicine', 'The Lancet', 'JAMA', 'BMJ', 'Nature Medicine', 'Cell', 'Science', 'Nature'];
 
             // 过滤出不在白名单的期刊给LLM判断
@@ -1558,14 +1562,15 @@ ${context}`;
             let highImpactJournals = journals.filter(j => topJournals.some(top => j.includes(top)));
 
             if (journalsToAnalyze.length > 0) {
-                const prompt = `你是一个医学期刊评估助手。请评估以下医学期刊的权威性。
+                // 降低Prompt门槛，要求识别SCI/核心期刊
+                const prompt = `你是一个医学期刊评估助手。请评估以下医学期刊。
                 
 期刊列表：
 ${journalsToAnalyze.join('\n')}
 
-请识别其中属于SCI高分（如IF>10）或各领域公认的权威核心期刊。
+请找出其中属于**Q1/Q2区**、**SCI收录**或**该领域知名**的期刊。
 返回JSON格式：{"high_impact": ["期刊名1", "期刊名2"]}
-如果没有，数组为空。只返回JSON，不要解释。`;
+尽可能多地识别出有一定影响力的期刊。如果没有，数组为空。`;
 
                 try {
                     const response = await fetch(`${AI_CONFIG.baseUrl}/chat/completions`, {
