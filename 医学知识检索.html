@@ -1481,12 +1481,19 @@ ${context}`;
             return documents.sort((a, b) => b.similarity - a.similarity).slice(0, 10);
         }
 
-        // 使用AI生成检索式（带重试）
-        async function generateSearchQuery(question, retries = 3) {
-            const prompt = `你是医学文献检索专家。将问题转换为PubMed检索关键词。
-要求：返回3-5个英文医学术语，空格分隔，不要解释。
+        // 使用AI生成多个检索关键词（用于组合查询）
+        async function generateSearchQueries(question, retries = 3) {
+            const prompt = `你是医学文献检索专家。将问题拆解为多个独立的检索关键词组合。
+
+要求：
+1. 生成3-4个不同的检索组合，每行一个
+2. 每个组合包含2-3个英文医学术语，用空格连接
+3. 从不同角度覆盖问题：疾病名称、治疗方法、药物、机制等
+4. 只返回关键词，不要解释
+
 问题：${question}
-关键词：`;
+
+检索组合（每行一个）：`;
 
             for (let i = 0; i < retries; i++) {
                 try {
@@ -1499,19 +1506,25 @@ ${context}`;
                         body: JSON.stringify({
                             model: 'gemini-3-flash-preview-thinking',
                             messages: [{ role: 'user', content: prompt }],
-                            max_tokens: 100
+                            max_tokens: 200
                         })
                     });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     const data = await response.json();
-                    const keywords = data.choices?.[0]?.message?.content?.trim();
-                    if (keywords && keywords.length > 2) return keywords;
+                    const content = data.choices?.[0]?.message?.content?.trim();
+                    if (content && content.length > 2) {
+                        // 按行分割，过滤空行和编号
+                        const queries = content.split('\n')
+                            .map(line => line.replace(/^\d+[\.\)]\s*/, '').trim())
+                            .filter(line => line.length > 2 && !line.includes('：') && !line.includes(':'));
+                        if (queries.length > 0) return queries.slice(0, 4);
+                    }
                 } catch (e) {
                     console.warn(`检索式生成失败(${i + 1}/${retries}):`, e);
                     if (i < retries - 1) await new Promise(r => setTimeout(r, 1000));
                 }
             }
-            return question;  // 重试失败后使用原问题
+            return [question];  // 重试失败后使用原问题
         }
 
         // 主RAG流程
@@ -1546,29 +1559,46 @@ ${context}`;
                 }
 
                 // === RAG模式：检索+生成 ===
-                // === 阶段0: 生成检索式 ===
-                updateQAProgress(5, '正在使用AI生成检索式...');
-                const searchQuery = await generateSearchQuery(question);
-                console.log('生成的检索式:', searchQuery);
+                // === 阶段0: 生成多个检索词组合 ===
+                updateQAProgress(5, '正在使用AI生成检索词组合...');
+                const searchQueries = await generateSearchQueries(question);
+                console.log('生成的检索词组合:', searchQueries);
 
                 // 显示检索式
-                document.getElementById('qaDetailQuery').textContent = searchQuery;
-                document.getElementById('qaStatusText').innerHTML = `检索式: <strong>${searchQuery}</strong>`;
+                document.getElementById('qaDetailQuery').textContent = searchQueries.join(' | ');
+                document.getElementById('qaStatusText').innerHTML = `检索组合: <strong>${searchQueries.join('</strong> + <strong>')}</strong>`;
 
-                // === 阶段1: 检索 ===
-                updateQAProgress(15, `正在使用 "${searchQuery}" 检索...`);
+                // === 阶段1: 多查询并行检索 ===
+                updateQAProgress(15, `正在使用 ${searchQueries.length} 个检索组合检索...`);
                 const allResults = [];
-                const searchPromises = sources.map(async src => {
-                    try {
-                        const data = await fetchForRAG(src, searchQuery);
-                        return data.items || [];
-                    } catch (e) {
-                        console.warn(`${src} 检索失败:`, e);
-                        return [];
+                const seenTitles = new Set(); // 用于去重
+
+                // 每个查询组合 x 每个数据源 并行执行
+                const allPromises = [];
+                for (const query of searchQueries) {
+                    for (const src of sources) {
+                        allPromises.push(
+                            fetchForRAG(src, query)
+                                .then(data => data.items || [])
+                                .catch(e => {
+                                    console.warn(`${src} 检索失败 (${query}):`, e);
+                                    return [];
+                                })
+                        );
                     }
+                }
+                const allResponses = await Promise.all(allPromises);
+
+                // 合并结果并去重（按标题）
+                allResponses.forEach(items => {
+                    items.forEach(item => {
+                        const titleKey = (item.title || '').toLowerCase().trim();
+                        if (titleKey && !seenTitles.has(titleKey)) {
+                            seenTitles.add(titleKey);
+                            allResults.push(item);
+                        }
+                    });
                 });
-                const results = await Promise.all(searchPromises);
-                results.forEach(items => allResults.push(...items));
 
                 // 填充检索详情
                 document.getElementById('qaDetailSearchCount').textContent = allResults.length;
@@ -1577,7 +1607,7 @@ ${context}`;
                 ).join('');
 
                 if (allResults.length === 0) {
-                    throw new Error(`未检索到相关文献（检索式: ${searchQuery}），请尝试其他问题`);
+                    throw new Error(`未检索到相关文献（检索组合: ${searchQueries.join(', ')}），请尝试其他问题`);
                 }
 
                 // === 阶段2: 分片 ===
