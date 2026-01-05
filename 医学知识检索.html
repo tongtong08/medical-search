@@ -1677,10 +1677,13 @@ ${contextWithRefs}`;
                 // === 阶段6: 展示结果 ===
                 updateQAProgress(100, '完成！');
 
-                // 使用marked渲染Markdown
-                document.getElementById('qaAnswerContent').innerHTML = typeof marked !== 'undefined'
+                // 使用marked渲染Markdown，并将引用格式转为上标
+                let renderedAnswer = typeof marked !== 'undefined'
                     ? marked.parse(answer)
                     : answer.replace(/\n/g, '<br>');
+                // 将[1][2]等转为蓝色上标
+                renderedAnswer = renderedAnswer.replace(/\[(\d+)\]/g, '<sup class="text-primary" style="font-size:0.7em;cursor:pointer" onclick="document.getElementById(\'qaRefList\').scrollIntoView()">[$1]</sup>');
+                document.getElementById('qaAnswerContent').innerHTML = renderedAnswer;
 
                 // 显示参考文献
                 const refListHtml = finalChunks.map((c, i) => {
