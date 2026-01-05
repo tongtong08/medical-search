@@ -889,8 +889,9 @@
         // 期刊数据源变化时显示/隐藏期刊区域
         function onJournalSourceChange() {
             const sources = getSelectedSources('journalSources');
-            const onlyEuropePMC = sources.length === 1 && sources[0] === 'europepmc';
-            document.getElementById('journalSection').classList.toggle('show', onlyEuropePMC);
+            // 修复：只要包含 europepmc 就显示期刊筛选，不需要"仅选中"
+            const hasEuropePMC = sources.includes('europepmc');
+            document.getElementById('journalSection').classList.toggle('show', hasEuropePMC);
         }
 
         function getSelectedSources(containerId) {
