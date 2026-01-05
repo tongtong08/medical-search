@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Europe PMC 文献分析助手 Pro</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f4f7f6;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .search-card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            padding: 25px;
+            margin-top: 30px;
+        }
+
+        .journal-dropdown {
+            position: absolute;
+            width: 100%;
+            max-height: 250px;
+            overflow-y: auto;
+            z-index: 2000;
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+            border: 1px solid #ddd;
+            background: white;
+            display: none;
+        }
+
+        .list-group-item-action {
+            cursor: pointer;
+        }
+
+        .list-group-item-action:hover {
+            background-color: #e9ecef;
+        }
+
+        .stat-box {
+            border-radius: 10px;
+            padding: 15px;
+            color: white;
+            text-align: center;
+        }
+
+        .bg-blue {
+            background: #4e73df;
+        }
+
+        .bg-green {
+            background: #1cc88a;
+        }
+
+        .bg-info {
+            background: #36b9cc;
+        }
+
+        .result-card {
+            border-left: 4px solid #4e73df;
+            margin-bottom: 15px;
+            transition: 0.3s;
+        }
+
+        .result-card:hover {
+            transform: translateX(5px);
+        }
+
+        .loading-spinner {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container mb-5">
+        <div class="search-card">
+            <h2 class="text-center mb-4">🔬 Europe PMC 智能文献分析系统</h2>
+
+            <form id="searchForm" class="row g-3">
+                <div class="col-md-6 position-relative" id="journalWrapper">
+                    <label class="form-label fw-bold">期刊名称 (支持联想, 如: Lancet, Nature)</label>
+                    <input type="text" id="journalInput" class="form-control" placeholder="输入1-2个字母开始匹配..."
+                        autocomplete="off">
+                    <input type="hidden" id="selectedIssn">
+                    <div id="journalDropdown" class="list-group journal-dropdown"></div>
+                </div>
+
+                <div class="col-md-6">
+                    <label class="form-label fw-bold">检索关键词 (可留空进行统计)</label>
+                    <input type="text" id="keyword" class="form-control" placeholder="例如: Diabetes, AI Healthcare...">
+                </div>
+
+                <div class="col-md-3">
+                    <label class="form-label fw-bold">开始年份</label>
+                    <input type="number" id="startYear" class="form-control" value="2020">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label fw-bold">结束年份</label>
+                    <input type="number" id="endYear" class="form-control" value="2026">
+                </div>
+
+                <div class="col-md-3 d-flex align-items-end">
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="onlyOA">
+                        <label class="form-check-label fw-bold" for="onlyOA">仅限 Open Access</label>
+                    </div>
+                </div>
+                <div class="col-md-3 d-flex align-items-end">
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="onlyFT">
+                        <label class="form-check-label fw-bold" for="onlyFT">仅限全文可用</label>
+                    </div>
+                </div>
+
+                <div class="col-12 text-center mt-4">
+                    <button type="submit" class="btn btn-primary btn-lg px-5" id="searchBtn">
+                        <span class="spinner-border spinner-border-sm loading-spinner" id="btnSpinner"></span>
+                        立即检索并生成统计
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <div id="statsPanel" class="row mt-4 d-none">
+            <div class="col-md-4 mb-3">
+                <div class="stat-box bg-blue">
+                    <div class="small">符合条件总文献</div>
+                    <h3 id="statTotal">0</h3>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="stat-box bg-green">
+                    <div class="small">Open Access 数量</div>
+                    <h3 id="statOA">0</h3>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="stat-box bg-info">
+                    <div class="small">全文 (Full Text) 数量</div>
+                    <h3 id="statFT">0</h3>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-4">
+            <div id="errorAlert" class="alert alert-danger d-none"></div>
+            <div id="resultsList"></div>
+            <div class="text-center mt-3">
+                <button id="loadMore" class="btn btn-outline-primary d-none">加载更多结果</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let cursorMark = "*";
+        const API_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest";
+
+        // --- 1. 期刊联想逻辑 ---
+        const jInput = document.getElementById('journalInput');
+        const jDropdown = document.getElementById('journalDropdown');
+        const jIssn = document.getElementById('selectedIssn');
+
+        // 期刊列表 - 从外部 JSON 加载
+        let ALL_JOURNALS = [];
+
+        // 页面加载时异步获取期刊列表
+        (async function loadJournals() {
+            try {
+                const res = await fetch('journals.json');
+                ALL_JOURNALS = await res.json();
+                console.log(`已加载 ${ALL_JOURNALS.length} 个期刊`);
+            } catch (err) {
+                console.error('加载期刊列表失败:', err);
+                // 使用备用的四大刊列表
+                ALL_JOURNALS = [
+                    { title: "The New England journal of medicine", issn: "0028-4793", abbr: "N Engl J Med" },
+                    { title: "Lancet (London, England)", issn: "0140-6736", abbr: "Lancet" },
+                    { title: "JAMA", issn: "0098-7484", abbr: "JAMA" },
+                    { title: "BMJ (Clinical research ed.)", issn: "0959-8138", abbr: "BMJ" }
+                ];
+            }
+        })();
+
+        // 防抖函数
+        function debounce(func, wait) {
+            let timeout;
+            return function (...args) {
+                clearTimeout(timeout);
+                timeout = setTimeout(() => func.apply(this, args), wait);
+            };
+        }
+
+        // 期刊搜索（带防抖）
+        jInput.addEventListener('input', debounce((e) => {
+            const val = e.target.value.trim().toLowerCase();
+            if (val.length < 2) {
+                jDropdown.style.display = 'none';
+                return;
+            }
+
+            // 本地过滤匹配 - 限制最多显示20条
+            const matched = ALL_JOURNALS.filter(j =>
+                j.title.toLowerCase().includes(val) ||
+                j.abbr.toLowerCase().includes(val) ||
+                j.issn.includes(val)
+            ).slice(0, 20);
+
+            if (matched.length > 0) {
+                jDropdown.innerHTML = matched.map(j => `
+                <button type="button" class="list-group-item list-group-item-action" 
+                        onclick="selectJournal('${j.title.replace(/'/g, "\\'")}', '${j.issn}')">
+                    <strong>${j.title}</strong> <br>
+                    <small class="text-muted">ISSN: ${j.issn} | 缩写: ${j.abbr}</small>
+                </button>
+            `).join('');
+                jDropdown.style.display = 'block';
+            } else {
+                jDropdown.innerHTML = '<div class="list-group-item text-muted">未找到匹配的期刊</div>';
+                jDropdown.style.display = 'block';
+            }
+        }, 200));
+
+        function selectJournal(title, issn) {
+            jInput.value = title;
+            jIssn.value = issn;
+            jDropdown.style.display = 'none';
+        }
+
+        // 点击外部关闭下拉框
+        document.addEventListener('click', (e) => {
+            if (!document.getElementById('journalWrapper').contains(e.target)) {
+                jDropdown.style.display = 'none';
+            }
+        });
+
+        // --- 2. 核心检索逻辑 ---
+        document.getElementById('searchForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            cursorMark = "*";
+            document.getElementById('resultsList').innerHTML = "";
+            document.getElementById('errorAlert').classList.add('d-none');
+            performSearch();
+        });
+
+        async function performSearch() {
+            const keyword = document.getElementById('keyword').value.trim();
+            const issn = jIssn.value;
+            const jName = jInput.value.trim();
+            const sYear = document.getElementById('startYear').value;
+            const eYear = document.getElementById('endYear').value;
+            const onlyOA = document.getElementById('onlyOA').checked;
+            const onlyFT = document.getElementById('onlyFT').checked;
+
+            // 构建查询语句
+            let queryParts = [];
+            if (issn) queryParts.push(`ISSN:"${issn}"`);
+            else if (jName) queryParts.push(`JOURNAL:"${jName}"`);
+
+            if (keyword) queryParts.push(`"${keyword}"`);
+            if (sYear && eYear) queryParts.push(`(PUB_YEAR:[${sYear} TO ${eYear}])`);
+            if (onlyOA) queryParts.push(`(OPEN_ACCESS:Y)`);
+            if (onlyFT) queryParts.push(`(HAS_FT:Y)`);
+
+            const finalQuery = queryParts.join(" AND ");
+            if (!finalQuery) {
+                showError("请输入关键词或选择一个期刊。");
+                return;
+            }
+
+            setLoading(true);
+
+            try {
+                // A. 执行统计（获取 Total, OA, FT 的数量）
+                // 注意：pageSize 必须 >= 1，否则API返回404
+                const [statRes, oaRes, ftRes] = await Promise.all([
+                    fetch(`${API_BASE}/search?query=${encodeURIComponent(finalQuery)}&pageSize=1&format=json`),
+                    fetch(`${API_BASE}/search?query=${encodeURIComponent(finalQuery + " AND (OPEN_ACCESS:Y)")}&pageSize=1&format=json`),
+                    fetch(`${API_BASE}/search?query=${encodeURIComponent(finalQuery + " AND (HAS_FT:Y)")}&pageSize=1&format=json`)
+                ]);
+
+                const statData = await statRes.json();
+                const oaData = await oaRes.json();
+                const ftData = await ftRes.json();
+
+                // 检查是否有错误响应
+                if (statData.errCode) {
+                    throw new Error(statData.errMsg || 'API返回错误');
+                }
+
+                document.getElementById('statsPanel').classList.remove('d-none');
+                document.getElementById('statTotal').innerText = (statData.hitCount || 0).toLocaleString();
+                document.getElementById('statOA').innerText = (oaData.hitCount || 0).toLocaleString();
+                document.getElementById('statFT').innerText = (ftData.hitCount || 0).toLocaleString();
+
+                // B. 获取文章列表
+                const listRes = await fetch(`${API_BASE}/search?query=${encodeURIComponent(finalQuery)}&cursorMark=${cursorMark}&pageSize=10&resultType=lite&format=json`);
+                const listData = await listRes.json();
+
+                if (listData.errCode) {
+                    throw new Error(listData.errMsg || 'API返回错误');
+                }
+
+                const results = listData.resultList?.result || [];
+                displayResults(results);
+                cursorMark = listData.nextCursorMark;
+                document.getElementById('loadMore').classList.toggle('d-none', results.length === 0);
+
+            } catch (err) {
+                showError("无法连接到 Europe PMC API。原因可能是：网络断开、跨域限制或请求过于频繁。具体错误：" + err.message);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function displayResults(articles) {
+            const container = document.getElementById('resultsList');
+            if (!articles || articles.length === 0) {
+                if (cursorMark === "*") container.innerHTML = '<div class="alert alert-warning">没有找到匹配的文章。</div>';
+                return;
+            }
+
+            articles.forEach(a => {
+                const card = document.createElement('div');
+                card.className = "card result-card p-3 shadow-sm";
+                card.innerHTML = `
+                <div class="d-flex justify-content-between">
+                    <h5 class="text-primary">${a.title || '无标题'}</h5>
+                    <span class="badge bg-secondary">${a.pubYear || 'N/A'}</span>
+                </div>
+                <div class="text-muted mb-2">${a.journalTitle || '未知期刊'} | ${a.authorString || '未知作者'}</div>
+                <div>
+                    ${a.isOpenAccess === 'Y' ? '<span class="badge bg-success">OA</span>' : ''}
+                    ${a.inEPMC === 'Y' ? '<span class="badge bg-info">Full Text Available</span>' : ''}
+                    ${a.doi ? `<a href="https://doi.org/${a.doi}" target="_blank" class="ms-3 btn btn-sm btn-outline-dark">DOI: ${a.doi}</a>` : ''}
+                </div>
+            `;
+                container.appendChild(card);
+            });
+        }
+
+        function setLoading(isLoading) {
+            document.getElementById('searchBtn').disabled = isLoading;
+            document.getElementById('btnSpinner').style.display = isLoading ? 'inline-block' : 'none';
+        }
+
+        function showError(msg) {
+            const errDiv = document.getElementById('errorAlert');
+            errDiv.innerText = msg;
+            errDiv.classList.remove('d-none');
+        }
+
+        document.getElementById('loadMore').onclick = performSearch;
+
+    </script>
+</body>
+
+</html>
