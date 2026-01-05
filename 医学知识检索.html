@@ -1555,14 +1555,24 @@ ${context}`;
             const journals = [...new Set(references.map(r => r.journal).filter(j => j))];
             if (journals.length === 0) return references;
 
-            // 预设顶级期刊白名单
-            const topJournals = ['New England Journal of Medicine', 'The Lancet', 'JAMA', 'BMJ', 'Nature Medicine', 'Cell', 'Science', 'Nature'];
+            // 扩大预设顶级/知名期刊白名单 (包括常见的神经/临床期刊)
+            const topJournals = [
+                'New England Journal of Medicine', 'The Lancet', 'JAMA', 'BMJ', 'Nature', 'Science', 'Cell',
+                'Neurology', 'J Neurosurg', 'Acta Neurochir', 'Stroke', 'Brain', 'Pain',
+                'Neurol Sci', 'Clin Neurol Neurosurg', 'Acta Clin Croat', // 针对用户截图中的期刊
+                'Plos One', 'Scientific Reports' // 常见大众期刊
+            ];
 
-            // 过滤出不在白名单的期刊给LLM判断
-            const journalsToAnalyze = journals.filter(j => !topJournals.some(top => j.includes(top)));
+            // 默认标记白名单期刊 (不分大小写模糊匹配)
+            let highImpactJournals = [];
+            journals.forEach(j => {
+                if (topJournals.some(top => j.toLowerCase().includes(top.toLowerCase()) || top.toLowerCase().includes(j.toLowerCase()))) {
+                    highImpactJournals.push(j);
+                }
+            });
 
-            // 默认标记白名单期刊
-            let highImpactJournals = journals.filter(j => topJournals.some(top => j.includes(top)));
+            // 剩余的才去问LLM
+            const journalsToAnalyze = journals.filter(j => !highImpactJournals.includes(j));
 
             if (journalsToAnalyze.length > 0) {
                 // 降低Prompt门槛，要求识别SCI/核心期刊
@@ -1597,7 +1607,8 @@ ${journalsToAnalyze.join('\n')}
                             jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
                             const res = JSON.parse(jsonStr);
                             if (res.high_impact && Array.isArray(res.high_impact)) {
-                                highImpactJournals.push(...res.high_impact);
+                                // 也是模糊匹配推入
+                                res.high_impact.forEach(hit => highImpactJournals.push(hit));
                             }
                         } catch (e) { console.warn('解析期刊评价JSON失败', e); }
                     }
@@ -1606,9 +1617,11 @@ ${journalsToAnalyze.join('\n')}
                 }
             }
 
-            // 标记权威期刊
+            // 标记权威期刊 (最终匹配)
             references.forEach(ref => {
-                if (ref.journal && highImpactJournals.includes(ref.journal)) {
+                const j = ref.journal;
+                // 只要 highImpactJournals 里有一个项 包含 j 或者被 j 包含
+                if (j && highImpactJournals.some(hit => j.toLowerCase().includes(hit.toLowerCase()) || hit.toLowerCase().includes(j.toLowerCase()))) {
                     ref.tags.push({ type: 'impact', label: '权威', icon: '⭐', class: 'bg-warning text-dark' });
                     ref.isHighImpact = true;
                 }
@@ -1882,13 +1895,14 @@ ${contextWithRefs}`;
                 const refListHtml = finalChunks.map((c, i) => {
                     const source = c.source;
                     const tagsHtml = source.tags ? source.tags.map(t =>
-                        `<span class="badge ${t.class || 'bg-secondary'} me-1" style="font-size:0.7em">${t.icon || ''} ${t.label}</span>`
+                        `<span class="badge ${t.class || 'bg-secondary'} me-1" style="font-size:0.75em; padding: 0.25em 0.5em;">${t.icon || ''} ${t.label}</span>`
                     ).join('') : '';
 
+                    // 移除 Score 显示
                     return `<div class="mb-2" id="ref-${i + 1}">
                         <strong>[${i + 1}]</strong> ${tagsHtml}
-                        <a href="${source.link || '#'}" target="_blank" class="text-decoration-none fw-bold">${source.title || '未知标题'}</a>
-                        ${source.journal ? `<div class="text-muted small ps-4">Score: ${c.score?.toFixed(2) || 'N/A'} | ${source.journal}${source.year ? ', ' + source.year : ''}</div>` : ''}
+                        <a href="${source.link || '#'}" target="_blank" class="text-decoration-none fw-bold" style="color:#0d6efd">${source.title || '未知标题'}</a>
+                        ${source.journal ? `<div class="text-muted small ps-4">${source.journal}${source.year ? ', ' + source.year : ''}</div>` : ''}
                     </div>`;
                 }).join('');
                 document.getElementById('qaRefList').innerHTML = refListHtml;
