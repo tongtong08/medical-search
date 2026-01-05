@@ -1222,9 +1222,14 @@
             setLoading('trial', true); hideError();
 
             try {
-                const res = await fetch(`https://clinicaltrials.gov/api/v2/studies?query.term=${encodeURIComponent(query)}&pageSize=25`);
+                // 修复：添加 countTotal=true 确保返回总数
+                const res = await fetch(`https://clinicaltrials.gov/api/v2/studies?query.term=${encodeURIComponent(query)}&pageSize=25&countTotal=true`);
                 const data = await res.json();
-                const count = data.totalCount || 0;
+
+                // 优先使用 totalCount，如果没有则使用 items.length 兜底（如果不为0）
+                const itemsCount = data.studies ? data.studies.length : 0;
+                const count = data.totalCount || itemsCount;
+
                 const items = (data.studies || []).map(s => ({ title: s.protocolSection?.identificationModule?.officialTitle || s.protocolSection?.identificationModule?.briefTitle, nctId: s.protocolSection?.identificationModule?.nctId, status: s.protocolSection?.statusModule?.overallStatus, phase: s.protocolSection?.designModule?.phases?.join(', '), conditions: s.protocolSection?.conditionsModule?.conditions?.join(', '), link: `https://clinicaltrials.gov/study/${s.protocolSection?.identificationModule?.nctId}` }));
 
                 document.getElementById('trialResults').classList.remove('d-none');
