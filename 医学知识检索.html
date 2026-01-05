@@ -1532,17 +1532,20 @@ ${context}`;
             if (!references || references.length === 0) return references;
 
             // 1. 基础规则标记 (时效性)
-            // 放宽标准：以2026年为例，2024-2026为最新(近3年)，2021-2023为近期(近5年)
+            // 严格标准：当前是2026年。
+            // 2025-2026: 最新 (🔥)
+            // 2024: 近3年 (🆕)
+            // 2023及以前: 无年份标记
             const currentYear = new Date().getFullYear();
             references.forEach(ref => {
                 ref.tags = []; // 初始化
                 const year = parseInt(ref.year);
                 if (!isNaN(year)) {
-                    if (year >= currentYear - 2) {
-                        ref.tags.push({ type: 'recent', label: '近3年', icon: '🔥', class: 'bg-danger' });
+                    if (year >= currentYear - 1) { // 2025, 2026
+                        ref.tags.push({ type: 'recent', label: '最新', icon: '🔥', class: 'bg-danger' });
                     }
-                    else if (year >= currentYear - 5) {
-                        ref.tags.push({ type: 'recent', label: '近5年', icon: '🆕', class: 'bg-success' });
+                    else if (year >= currentYear - 2) { // 2024
+                        ref.tags.push({ type: 'recent', label: '近3年', icon: '🆕', class: 'bg-success' });
                     }
                 }
             });
@@ -1563,14 +1566,14 @@ ${context}`;
 
             if (journalsToAnalyze.length > 0) {
                 // 降低Prompt门槛，要求识别SCI/核心期刊
-                const prompt = `你是一个医学期刊评估助手。请评估以下医学期刊。
+                const prompt = `你是一个医学期刊评估助手。当前年份是${currentYear}年。请评估以下医学期刊。
                 
 期刊列表：
 ${journalsToAnalyze.join('\n')}
 
 请找出其中属于**Q1/Q2区**、**SCI收录**或**该领域知名**的期刊。
 返回JSON格式：{"high_impact": ["期刊名1", "期刊名2"]}
-尽可能多地识别出有一定影响力的期刊。如果没有，数组为空。`;
+如果没有，数组为空。`;
 
                 try {
                     const response = await fetch(`${AI_CONFIG.baseUrl}/chat/completions`, {
