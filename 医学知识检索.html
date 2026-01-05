@@ -705,7 +705,7 @@
                             <label><input type="checkbox" value="gpt-5.2"> GPT 5.2</label>
                             <label><input type="checkbox" value="claude-opus-4-5-20251101-thinking"> Claude Opus
                                 4.5</label>
-                            <label><input type="checkbox" value="doubao-seed-1-8-251215"> Doubao Seed</label>
+                            <label><input type="checkbox" value="doubao-seed-1-8-251215"> Doubao Seed 1.8</label>
                             <label><input type="checkbox" value="DeepSeek-V3.2-Thinking"> DeepSeek V3.2</label>
                         </div>
                     </div>
@@ -838,7 +838,7 @@
                     <option value="gemini-3-pro-preview-thinking">Gemini 3 Pro</option>
                     <option value="gpt-5.2">GPT-5.2</option>
                     <option value="claude-opus-4-5-20251101-thinking">Claude Opus 4.5</option>
-                    <option value="doubao-seed-1-8-251215">Doubao Seed</option>
+                    <option value="doubao-seed-1-8-251215">Doubao Seed 1.8</option>
                     <option value="DeepSeek-V3.2-Thinking">DeepSeek V3.2</option>
                 </select>
                 <button class="btn btn-sm btn-light ms-2" onclick="toggleAIPanel()"><i class="bi bi-x"></i></button>
@@ -1156,14 +1156,60 @@
         async function fetchDrugData(src, query) {
             switch (src) {
                 case 'openfda':
-                    const res1 = await fetch(`https://api.fda.gov/drug/label.json?search=${encodeURIComponent(query)}&limit=25`);
+                    // 优化：改为字段精确查询，避免全文搜索带来的噪音（如搜Aspirin出Naproxen）
+                    const qRaw = encodeURIComponent(query).replace(/%20/g, '+');
+                    const searchQuery = `(openfda.brand_name:"${qRaw}"+openfda.generic_name:"${qRaw}")`;
+                    const res1 = await fetch(`https://api.fda.gov/drug/label.json?search=${searchQuery}&limit=15`);
+
+                    if (res1.status === 404 || res1.status === 400) return { count: 0, items: [] }; // 处理无结果情况
                     const d1 = await res1.json();
-                    return { count: d1.meta?.results?.total || 0, items: (d1.results || []).map(a => ({ src: 'openfda', title: a.openfda?.brand_name?.[0] || a.openfda?.generic_name?.[0] || '未知', generic: a.openfda?.generic_name?.[0] || '', manufacturer: a.openfda?.manufacturer_name?.[0] || '', indication: (a.indications_and_usage?.[0] || '').substring(0, 120), route: a.openfda?.route?.[0] || '', link: a.openfda?.spl_id?.[0] ? `https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid=${a.openfda.spl_id[0]}` : '#' })) };
+
+                    const items1 = (d1.results || []).map(a => {
+                        const brand = a.openfda?.brand_name?.[0];
+                        const generic = a.openfda?.generic_name?.[0];
+                        // 过滤掉没有基本信息的条目
+                        if (!brand && !generic) return null;
+
+                        // 构造更稳健的链接
+                        let link = '#';
+                        if (a.openfda?.spl_set_id?.[0]) {
+                            link = `https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid=${a.openfda.spl_set_id[0]}`;
+                        } else if (a.openfda?.spl_id?.[0]) {
+                            link = `https://dailymed.nlm.nih.gov/dailymed/drugInfo.cfm?setid=${a.openfda.spl_id[0]}`;
+                        } else {
+                            // 兜底链接
+                            link = `https://open.fda.gov/apis/drug/label/explore/?q=${qRaw}`;
+                        }
+
+                        return {
+                            src: 'openfda',
+                            title: brand || generic || '未知药品',
+                            generic: generic || 'N/A',
+                            manufacturer: a.openfda?.manufacturer_name?.[0] || '未知厂商',
+                            indication: (a.indications_and_usage?.[0] || '暂无适应症说明').substring(0, 150) + '...',
+                            route: a.openfda?.route?.[0] || '未知途径',
+                            link: link
+                        };
+                    }).filter(Boolean); // 移除null项
+
+                    return { count: d1.meta?.results?.total || 0, items: items1 };
+
                 case 'rxnorm':
                     const res2 = await fetch(`https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(query)}`);
                     const d2 = await res2.json();
-                    const items = []; (d2.drugGroup?.conceptGroup || []).forEach(g => (g.conceptProperties || []).forEach(p => items.push({ src: 'rxnorm', name: p.name, rxcui: p.rxcui, tty: p.tty, link: `https://mor.nlm.nih.gov/RxNav/search?searchBy=RXCUI&searchTerm=${p.rxcui}` })));
-                    return { count: items.length, items };
+                    const items2 = [];
+                    (d2.drugGroup?.conceptGroup || []).forEach(g =>
+                        (g.conceptProperties || []).forEach(p =>
+                            items2.push({
+                                src: 'rxnorm',
+                                name: p.name,
+                                rxcui: p.rxcui,
+                                tty: p.tty,
+                                link: `https://mor.nlm.nih.gov/RxNav/search?searchBy=RXCUI&searchTerm=${p.rxcui}`
+                            })
+                        )
+                    );
+                    return { count: items2.length, items: items2 };
             }
         }
 
