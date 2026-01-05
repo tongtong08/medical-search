@@ -1483,17 +1483,22 @@ ${context}`;
 
         // 使用AI生成多个检索关键词（用于组合查询）
         async function generateSearchQueries(question, retries = 3) {
-            const prompt = `你是资深医学文献检索专家。请对用户问题进行深度语义分析，推理出核心检索概念。
+            const prompt = `你是医学文献检索专家。请对用户问题进行分析，生成高效的检索策略。
+            
+执行步骤：
+1. **提取关键词**：识别问题中的核心医学实体（如疾病、药物、症状）。
+2. **知识点分解**：将问题拆解为2-4个需要查询的关键知识点（如"治疗方案"、"副作用"、"禁忌症"、"发病机制"等）。
+3. **生成检索式**：为每个知识点生成一个独立的检索式。检索式应包含关键词组合，尽量使用通用的医学英语术语。
 
 要求：
-1. **拒绝简单翻译**：不要直接翻译问题，要推理出背后的医学概念（MeSH Terms）
-2. **多维扩展**：生成3-4个不同的检索组合，覆盖疾病本名、别名、相关药物、病理机制等不同角度
-3. **专业精准**：每个组合包含2-3个英文医学专业术语（空格分隔）
-4. 只返回关键词组合，每行一个，不要解释
+- 返回格式：每行一个检索式。
+- 检索式应简洁有效（例如："Diabetes treatment guidelines" 而非 "Please search for..."）。
+- 包含原文关键词的直接翻译作为兜底。
+- 只返回检索式列表，不要解释。
 
 问题：${question}
 
-推导出的检索组合（每行一个）：`;
+检索式列表（每行一个）：`;
 
             for (let i = 0; i < retries; i++) {
                 try {
@@ -1506,7 +1511,7 @@ ${context}`;
                         body: JSON.stringify({
                             model: 'gemini-3-flash-preview-thinking',
                             messages: [{ role: 'user', content: prompt }],
-                            max_tokens: 200
+                            max_tokens: 300
                         })
                     });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1515,9 +1520,12 @@ ${context}`;
                     if (content && content.length > 2) {
                         // 按行分割，过滤空行和编号
                         const queries = content.split('\n')
-                            .map(line => line.replace(/^\d+[\.\)]\s*/, '').trim())
-                            .filter(line => line.length > 2 && !line.includes('：') && !line.includes(':'));
-                        if (queries.length > 0) return queries.slice(0, 4);
+                            .map(line => line.replace(/^\d+[\.\)]\s*/, '').replace(/^- /, '').trim())
+                            .filter(line => line.length > 2 && !line.includes('：') && !line.toLowerCase().includes('generate'));
+
+                        // 去重
+                        const uniqueQueries = [...new Set(queries)];
+                        if (uniqueQueries.length > 0) return uniqueQueries;
                     }
                 } catch (e) {
                     console.warn(`检索式生成失败(${i + 1}/${retries}):`, e);
@@ -1737,7 +1745,12 @@ ${journalsToAnalyze.join('\n')}
                 // === 阶段3: 向量化 ===
                 updateQAProgress(50, '正在进行向量化嵌入 (Embedding)...');
                 const chunkTexts = chunks.map(c => c.text);
-                const questionEmbedding = (await getEmbeddings([question]))[0];
+
+                // 优化：同时考虑原始问题和生成的检索式（增强语义匹配）
+                const enhancedQuery = `${question}\nRelated Context: ${searchQueries.join(', ')}`;
+                console.log('Enhanced Query for Embedding/Rerank:', enhancedQuery);
+
+                const questionEmbedding = (await getEmbeddings([enhancedQuery]))[0];
 
                 // 分批处理避免超限
                 const batchSize = 50;
@@ -1768,7 +1781,8 @@ ${journalsToAnalyze.join('\n')}
 
                 // === 阶段4: 重排 ===
                 updateQAProgress(75, '正在使用Rerank模型重新排序...');
-                const rerankedChunks = await rerankDocuments(question, topChunks);
+                // 同样使用增强的Query进行Rerank
+                const rerankedChunks = await rerankDocuments(enhancedQuery, topChunks);
                 const finalChunks = rerankedChunks.slice(0, 10);
 
                 // === 阶段4.5: 文献权威性评估 ===
